@@ -25,8 +25,9 @@ ARCHIVE_EXT = {".zip", ".rar", ".cbz", ".cbr", ".7z"}
 # 日本語の文字に挟まれた x/X も区切りとみなす（英字名の中の x は区切らない）
 AUTHOR_SEP = re.compile(r"[×✕／/、，,&＆]|(?<=[^\x00-\x7F])[xX](?=[^\x00-\x7F])")
 HEAD_RE = re.compile(r"^\s*\[(?P<auth>[^\]]*)\]\s*(?P<rest>.*)$")
+# 巻番号のあとの記号（w・s のほか、本番ライブラリには b もある）は英字1〜2文字まで許す
 VOL_RE = re.compile(
-    r"^(?P<title>.*?)\s*第\s*(?P<v1>\d+)\s*(?:(?P<sep>[-~～〜\s])\s*(?P<v2>\d*))?\s*巻?\s*(?P<sfx>[wsWS])?\s*$")
+    r"^(?P<title>.*?)\s*第\s*(?P<v1>\d+)\s*(?:(?P<sep>[-~～〜\s])\s*(?P<v2>\d*))?\s*巻?\s*(?P<sfx>[A-Za-z]{1,2})?\s*$")
 SINGLE_DIR = "_single"
 
 # 判定のしきい値（暫定。本番ライブラリの一覧で調整する）

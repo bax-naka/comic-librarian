@@ -175,6 +175,7 @@ class Parse(unittest.TestCase):
         p = clo.parse_name("[蝉川夏哉×碓井ツカサ] 異世界居酒屋｢げん｣ 第01 14巻")
         self.assertEqual(clo.volumes(p), set(range(1, 15)))
         self.assertEqual(clo.parse_name("[x] 題 第02巻w").v1, 2)
+        self.assertEqual(clo.parse_name("[x] 題 第21巻b").v1, 21)          # 本番ライブラリにある b 付き
         self.assertEqual(clo.norm("異世界居酒屋｢げん｣"), clo.norm("異世界居酒屋「げん」"))
         self.assertEqual(clo.parse_name("[あろえ×立山鈴] t").authors, clo.parse_name("[立山鈴×あろえ] t").authors)
 
