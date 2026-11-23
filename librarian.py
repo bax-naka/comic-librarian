@@ -2,6 +2,7 @@
 """新刊フォルダの書庫ファイルを、ライブラリの作品フォルダへ振り分ける（試作）。
 
   python librarian.py plan --library LIB --new NEW     計画を表示するだけ（何も動かさない）
+  python librarian.py list                             ライブラリを選んで一覧TSVを書き出す
   python librarian.py run  --library LIB --new NEW     要確認を対話で選び、確認後に移動して照合する
   python librarian.py plan --tsv LIST.tsv              一覧TSV（LIBRARY/, NEW/ で始まる相対パス）から計画だけ作る
 
@@ -188,7 +189,8 @@ def make_plan(works, new_files):
     return items
 
 
-def show_plan(items, out=sys.stdout):
+def show_plan(items, out=None):
+    out = out or sys.stdout          # 呼び出し時点の sys.stdout（記録用の Tee）に書く
     for kind in ORDER:
         group = [i for i in items if i.kind == kind]
         if not group:
@@ -368,49 +370,97 @@ def load_tsv(path, lib="LIBRARY", new="NEW"):
     return dirs, files, newf
 
 
+class Tee:
+    """画面に出す内容を、同時に記録ファイルにも書く（引き渡し用）。"""
+
+    def __init__(self, stream, path):
+        self.stream, self.file = stream, open(path, "a", encoding="utf-8")
+
+    def write(self, text):
+        self.stream.write(text)
+        self.file.write(text)
+        return len(text)
+
+    def flush(self):
+        self.stream.flush()
+        self.file.flush()
+
+    def isatty(self):
+        return self.stream.isatty()
+
+    def note(self, text):
+        """入力された回答など、画面には既に出ているものを記録ファイルにだけ書く。"""
+        self.file.write(text + "\n")
+        self.file.flush()
+
+
+def default_out_dir():
+    # Termux のホームはファイルアプリから見えないため、引き渡しやすい Download に置く
+    base = "/sdcard/Download" if os.path.isdir("/sdcard/Download") else os.getcwd()
+    return os.path.join(base, "librarian")
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("cmd", choices=["plan", "run", "list"])
     ap.add_argument("--library")
     ap.add_argument("--new")
     ap.add_argument("--tsv")
-    ap.add_argument("--out", help="list の出力先（既定: /sdcard/Download/librarian_list.tsv）")
-    ap.add_argument("--log-dir", default=os.path.expanduser("~/librarian_logs"))
+    ap.add_argument("--out-dir", default=default_out_dir(),
+                    help="一覧・画面の記録・移動ログの出力先（既定: /sdcard/Download/librarian）")
     a = ap.parse_args(argv)
-    if a.cmd == "list":
-        lib = a.library or pick_library()
-        if not os.path.isdir(lib):
-            ap.error(f"フォルダが見つかりません: {lib}")
-        out = a.out or ("/sdcard/Download/librarian_list.tsv" if os.path.isdir("/sdcard/Download")
-                        else "librarian_list.tsv")
-        nd, nf, size = write_list(lib, out)
-        print(f"フォルダ {nd}件・ファイル {nf}件・合計 {mb(size)}\n出力: {out}")
-        return 0
     if a.tsv:
         if a.cmd != "plan":
             ap.error("--tsv は plan 専用です")
         dirs, files, newf = load_tsv(a.tsv)
-    else:
-        if not (a.library and a.new):
-            ap.error("--library と --new を指定してください")
-        dirs, files = scan(a.library)
-        newf = new_files_in(a.new)
-    items = make_plan(build_library(dirs, files), newf)
+        show_plan(make_plan(build_library(dirs, files), newf))
+        return 0
+    os.makedirs(a.out_dir, exist_ok=True)
+    stamp = f"{dt.datetime.now():%Y%m%d-%H%M%S}"
+    tee = Tee(sys.stdout, os.path.join(a.out_dir, f"{a.cmd}_{stamp}.txt"))
+    sys.stdout = tee
+
+    def inp(prompt):
+        ans = input(prompt)
+        tee.note(ans)
+        return ans
+
+    try:
+        return run_command(a, ap, stamp, inp)
+    finally:
+        sys.stdout = tee.stream
+        print(f"（画面の記録: {tee.file.name}）")
+        tee.file.close()
+
+
+def run_command(a, ap, stamp, inp):
+    if a.cmd == "list":
+        lib = a.library or pick_library(inp)
+        if not os.path.isdir(lib):
+            ap.error(f"フォルダが見つかりません: {lib}")
+        out = os.path.join(a.out_dir, f"list_{stamp}.tsv")
+        nd, nf, size = write_list(lib, out)
+        print(f"ライブラリ: {lib}\nフォルダ {nd}件・ファイル {nf}件・合計 {mb(size)}\n一覧: {out}")
+        return 0
+    if not (a.library and a.new):
+        ap.error("--library と --new を指定してください")
+    print(f"ライブラリ: {a.library}\n新刊フォルダ: {a.new}")
+    dirs, files = scan(a.library)
+    items = make_plan(build_library(dirs, files), new_files_in(a.new))
     show_plan(items)
     if a.cmd == "plan":
         return 0
-    ask_review(items)
+    ask_review(items, inp)
     print("\n===== 実行内容 =====")
     show_plan(items)
-    if input("\nこの内容で移動しますか？ [y/N] ").strip().lower() != "y":
+    if inp("\nこの内容で移動しますか？ [y/N] ").strip().lower() != "y":
         print("中止しました（何も動かしていません）")
         return 1
-    os.makedirs(a.log_dir, exist_ok=True)
-    log_path = os.path.join(a.log_dir, f"{dt.datetime.now():%Y%m%d-%H%M%S}.tsv")
+    log_path = os.path.join(a.out_dir, f"run_{stamp}.tsv")
     print("\n===== 移動 =====")
     ok, ng = execute(items, a.library, a.new, log_path)
     problems = verify(items, a.library, a.new)
-    print(f"\n===== 結果 =====\n移動 OK {ok}件 / NG {ng}件\nログ: {log_path}")
+    print(f"\n===== 結果 =====\n移動 OK {ok}件 / NG {ng}件\n移動ログ: {log_path}")
     print("照合: 計画どおり" if not problems else "照合で不一致:\n  " + "\n  ".join(problems))
     left = sorted(n for n, _ in new_files_in(a.new))
     if left:

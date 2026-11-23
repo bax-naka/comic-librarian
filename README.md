@@ -16,7 +16,11 @@ python librarian.py list                                                # ライ
 
 - `run` は要確認の新刊を1件ずつ選ばせる（候補番号／`n`＝新規作品として直下へ／Enter＝見送り）
 - 移動中は件数・サイズ・全体の%と、rsync の進捗（転送量・%・速度・残り時間）を表示
-- ログは `~/librarian_logs/日時.tsv`（日時・結果・元・移動先・サイズ）
+- 出力はすべて `/sdcard/Download/librarian/` に置く（ファイルアプリから見え、そのまま引き渡せる）
+  - `plan_日時.txt` / `run_日時.txt` / `list_日時.txt`：画面の記録（入力した回答も含む）
+  - `run_日時.tsv`：移動ログ（日時・結果・判定・元・移動先・サイズ）
+  - `list_日時.tsv`：ライブラリの一覧
+  - `check_日時.log`：`tools/check_storage.sh` の記録
 
 端末の事前確認（ライブラリには触れない）：`bash tools/check_storage.sh`（`--sleep` で画面を消しても止まらないかも確認）
 

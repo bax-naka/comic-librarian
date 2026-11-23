@@ -2,6 +2,10 @@
 # 端末の事前確認（ライブラリには触れない）。SDカード直下に clo_check、Download に clo_check を作り、最後に消す。
 #   bash tools/check_storage.sh          … 書き込み・移動・上書き防止・中断の確認
 #   bash tools/check_storage.sh --sleep  … 上記に加え、画面を消しても処理が止まらないかを確認
+# 画面の内容は /sdcard/Download/librarian/check_日時.log にも記録する（引き渡し用）
+OUT=/sdcard/Download/librarian; mkdir -p "$OUT"
+LOG="$OUT/check_$(date +%Y%m%d-%H%M%S).log"
+exec > >(tee -a "$LOG") 2>&1
 echo "== 環境"
 echo "Android $(getprop ro.build.version.release) / $(getprop ro.product.model)"
 termux-info 2>/dev/null | grep -E 'TERMUX_APK_RELEASE|TERMUX_VERSION'
@@ -47,3 +51,4 @@ if [ "$1" = "--sleep" ]; then
 fi
 echo "== 後片付け"
 rm -rf "$T" "$D" && echo "完了"
+echo "（画面の記録: $LOG）"

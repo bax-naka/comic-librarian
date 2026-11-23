@@ -41,6 +41,7 @@
 - 移動中は termux-wake-lock で画面が消えても止まらないようにする（Galaxy の電池最適化下での効果は手順4.5で確認）
 - Galaxy へのコード取り込みは当面 `gh auth login`（後で読み取り専用トークンに替えられる）
 - 本番の一覧は Galaxy 上で `librarian.py list` で作る（SDカードを抜いてPCで読む方法はやめる）
+- 出力（画面の記録・移動ログ・一覧・確認ログ）はすべて `Download/librarian/` に書き、Google ドライブの「Claude」フォルダ経由で引き渡す（貼り付けはやめる）
 
 ## 未確定・注意
 
