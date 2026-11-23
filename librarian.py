@@ -318,29 +318,66 @@ def verify(items, lib, new):
 
 
 # ---------------------------------------------------------------- 一覧の書き出し
-def detect_sd():
-    """termux-setup-storage が作る ~/storage/external-1 のリンク先から SD カードのルートを得る。"""
+SD_RE = re.compile(r"/storage/[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}")
+SKIP_DIRS = {"Android", "LOST.DIR"}
+
+
+def detect_sd(link="~/storage/external-1", mounts="/proc/mounts"):
+    """SD カードのルートを得る。termux-setup-storage のリンクが無い端末（Galaxy など）では
+    /proc/mounts から探す（tools/check_storage.sh と同じ方法）。"""
     try:
-        target = os.readlink(os.path.expanduser("~/storage/external-1"))
+        m = SD_RE.match(os.readlink(os.path.expanduser(link)))
+        if m:
+            return m.group(0)
+    except OSError:
+        pass
+    try:
+        with open(mounts, encoding="utf-8") as f:
+            m = SD_RE.search(f.read())
+        return m.group(0) if m else None
     except OSError:
         return None
-    m = re.match(r"^(/storage/[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4})", target)
-    return m.group(1) if m else None
 
 
-def pick_library(inp=input):
-    cands = []
-    for root in (detect_sd(), "/sdcard"):
+def candidate_dirs(roots, depth=2):
+    """各ルートの下、depth 階層までのフォルダ（隠し・Android・LOST.DIR は除く）。"""
+    out = []
+    for root in roots:
         if not root or not os.path.isdir(root):
             continue
-        for n in sorted(os.listdir(root)):
-            p = os.path.join(root, n)
-            if os.path.isdir(p) and not n.startswith(".") and n not in ("Android", "LOST.DIR"):
-                cands.append(p)
+        stack = [(root, 0)]
+        while stack:
+            d, lv = stack.pop()
+            try:
+                names = sorted(os.listdir(d), reverse=True)
+            except OSError:
+                continue
+            for n in names:
+                p = os.path.join(d, n)
+                if os.path.isdir(p) and not n.startswith(".") and n not in SKIP_DIRS:
+                    if lv + 1 <= depth:
+                        out.append((lv + 1, p))
+                    if lv + 1 < depth:
+                        stack.append((p, lv + 1))
+    return sorted(p for _, p in out)
+
+
+def pick_library(inp=input, roots=None):
+    roots = roots or [detect_sd(), "/sdcard"]
+    cands = candidate_dirs(roots)
     for k, p in enumerate(cands, 1):
         print(f"  {k}: {p}")
     ans = inp("ライブラリのフォルダ（番号、または絶対パス）> ").strip()
-    return cands[int(ans) - 1] if ans.isdigit() and 1 <= int(ans) <= len(cands) else ans
+    if ans.isdigit() and 1 <= int(ans) <= len(cands):
+        return cands[int(ans) - 1]
+    if not os.path.isdir(ans):
+        # 入力したパスが無いとき、同じ名前のフォルダを候補から探して示す
+        same = [p for p in candidate_dirs(roots, depth=3) if os.path.basename(p) == os.path.basename(ans.rstrip("/"))]
+        if same:
+            print("見つかりません。同じ名前のフォルダ:\n  " + "\n  ".join(same))
+            if len(same) == 1 and inp(f"{same[0]} を使いますか？ [y/N] ").strip().lower() == "y":
+                return same[0]
+    return ans
 
 
 def write_list(lib, out):

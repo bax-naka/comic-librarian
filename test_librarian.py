@@ -99,6 +99,34 @@ class ListOutput(unittest.TestCase):
             shutil.rmtree(t)
 
 
+class Picker(unittest.TestCase):
+    def test_detect_sd_from_mounts(self):
+        t = tempfile.mkdtemp()
+        try:
+            mounts = os.path.join(t, "mounts")
+            with open(mounts, "w", encoding="utf-8") as f:
+                f.write("/dev/fuse /storage/emulated fuse rw 0 0\n/dev/fuse /storage/4FF7-51B2 fuse rw 0 0\n")
+            self.assertEqual(clo.detect_sd(link=os.path.join(t, "none"), mounts=mounts), "/storage/4FF7-51B2")
+        finally:
+            shutil.rmtree(t)
+
+    def test_pick_second_level_and_same_name(self):
+        t = tempfile.mkdtemp()
+        try:
+            sd, internal = os.path.join(t, "sd"), os.path.join(t, "sdcard")
+            for d in ("sd/Documents/SD_comic", "sd/Android/data", "sdcard/Download"):
+                os.makedirs(os.path.join(t, d))
+            cands = clo.candidate_dirs([sd, internal])
+            self.assertIn(os.path.join(sd, "Documents", "SD_comic"), cands)
+            self.assertNotIn(os.path.join(sd, "Android"), cands)
+            answers = iter([os.path.join(internal, "Documents", "SD_comic"), "y"])
+            with redirect_stdout(io.StringIO()):
+                got = clo.pick_library(inp=lambda _: next(answers), roots=[sd, internal])
+            self.assertEqual(got, os.path.join(sd, "Documents", "SD_comic"))
+        finally:
+            shutil.rmtree(t)
+
+
 class Parse(unittest.TestCase):
     def test_variants(self):
         p = clo.parse_name("[蝉川夏哉×碓井ツカサ] 異世界居酒屋｢げん｣ 第01 14巻")
