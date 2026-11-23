@@ -5,6 +5,7 @@
   python librarian.py list                             ライブラリを選んで一覧TSVを書き出す
   python librarian.py run  --library LIB --new NEW     要確認を対話で選び、確認後に移動して照合する
   python librarian.py plan --tsv LIST.tsv              一覧TSV（LIBRARY/, NEW/ で始まる相対パス）から計画だけ作る
+  python librarian.py apply [PLAN.tsv]                 ライブラリ整理の計画（移動・ゴミ箱へ）を確認後に実行して照合する
 
 標準ライブラリ＋rsync のみ使用（Termux 想定）。
 安全の基準：上書きしない／移動は rsync（一時名→付け替え→成功後に元を削除）／1件ごとにログを残す。
@@ -12,6 +13,7 @@
 import argparse
 import datetime as dt
 import difflib
+import glob
 import os
 import re
 import shutil
@@ -413,6 +415,178 @@ def write_list(lib, out):
     return len(dirs), len(files), sum(s for _, s in files)
 
 
+# ---------------------------------------------------------------- 整理計画の適用（apply）
+# 計画TSV（tools/make_cleanup_plan.py が作る）：操作・対象・移動先・ファイル数・バイト数・メモ。
+# パスはライブラリ基準。どれも同じSDカード内の名前の付け替えで、中身はコピーしない。
+#   MOVE   ファイルを別の作品フォルダへ移す（上書きしない）
+#   RMDIR  MOVE で空になったフォルダを消す（空でなければ消えない）
+#   TRASH  フォルダごとゴミ箱（ライブラリの外・同じSDカード）へ移す。完全には消さない
+PLAN_OPS = ("MOVE", "RMDIR", "TRASH")
+TRASH_DIR = "_librarian_trash"
+
+
+@dataclass
+class Op:
+    op: str
+    src: str
+    dst: str = ""
+    count: int = 0
+    size: int = 0
+    memo: str = ""
+
+
+def load_ops(path):
+    lib, ops = None, []
+    with open(path, encoding="utf-8") as f:
+        for ln in f:
+            ln = ln.rstrip("\n")
+            if ln.startswith("# library:"):
+                lib = ln.split(":", 1)[1].strip()
+            if not ln.strip() or ln.startswith("#"):
+                continue
+            op, src, dst, n, size, memo = (ln.split("\t") + [""] * 6)[:6]
+            if op not in PLAN_OPS:
+                raise ValueError(f"不明な操作: {op}")
+            ops.append(Op(op, src, dst, int(n or 0), int(size or 0), memo))
+    return lib, ops
+
+
+def find_plan(roots=("/sdcard/Download",)):
+    """計画ファイルの指定が無いとき：Download（とその1階層下）で一番新しい cleanup_plan*.tsv。"""
+    found = [p for r in roots for pat in ("cleanup_plan*.tsv", "*/cleanup_plan*.tsv")
+             for p in glob.glob(os.path.join(r, pat))]
+    return max(found, key=os.path.getmtime) if found else None
+
+
+def tree_stat(path):
+    n = size = 0
+    for dp, _dns, fns in os.walk(path):
+        for f in fns:
+            n += 1
+            size += os.path.getsize(os.path.join(dp, f))
+    return n, size
+
+
+def op_dest(o, lib, trash):
+    return (os.path.join(lib, o.dst) if o.op == "MOVE" else
+            os.path.join(trash, o.src) if o.op == "TRASH" else "")
+
+
+def check_ops(ops, lib, trash):
+    """実行前の確認。計画を作ったときの一覧と食い違うものが1つでもあれば、何もしない。"""
+    problems = []
+    moves_from = {}
+    for o in ops:
+        if o.op == "MOVE":
+            moves_from.setdefault(os.path.dirname(o.src), set()).add(os.path.basename(o.src))
+    for o in ops:
+        s, d = os.path.join(lib, o.src), op_dest(o, lib, trash)
+        if o.op == "MOVE":
+            if not (os.path.isfile(s) and os.path.getsize(s) == o.size):
+                problems.append(f"元のファイルが無いかサイズが違う: {o.src}")
+            if not os.path.isdir(os.path.dirname(d)):
+                problems.append(f"移動先のフォルダが無い: {os.path.dirname(o.dst)}")
+            elif os.path.lexists(d):
+                problems.append(f"移動先に同名がある: {o.dst}")
+        elif not os.path.isdir(s):
+            problems.append(f"フォルダが無い: {o.src}")
+        elif o.op == "RMDIR":
+            if set(os.listdir(s)) != moves_from.get(o.src, set()):
+                problems.append(f"移すファイル以外が入っている: {o.src}")
+        else:
+            if tree_stat(s) != (o.count, o.size):
+                problems.append(f"中身が計画時と違う（{o.count}件 {mb(o.size)} のはず）: {o.src}")
+            if os.path.lexists(d):
+                problems.append(f"ゴミ箱に同名がある: {d}")
+    return problems
+
+
+def op_done(o, lib, trash):
+    s, d = os.path.join(lib, o.src), op_dest(o, lib, trash)
+    if os.path.lexists(s):
+        return False
+    if o.op == "MOVE":
+        return os.path.isfile(d) and os.path.getsize(d) == o.size
+    if o.op == "TRASH":
+        return os.path.isdir(d) and tree_stat(d) == (o.count, o.size)
+    return True
+
+
+def apply_ops(ops, lib, trash, log_path):
+    """1件ずつ実行して確認し、ログに書く。NG が出たらそこで止める。戻り値は実行できた件数。"""
+    ok = 0
+    with open(log_path, "w", encoding="utf-8") as log:
+        log.write("時刻\t結果\t操作\t対象\t移動先\tファイル数\tバイト数\t備考\n")
+        for n, o in enumerate(ops, 1):
+            s, d = os.path.join(lib, o.src), op_dest(o, lib, trash)
+            print(f"[{n}/{len(ops)}] {o.op} {o.src}", flush=True)
+            note = ""
+            try:
+                if o.op == "RMDIR":
+                    os.rmdir(s)                          # 空でなければ失敗する
+                else:
+                    os.makedirs(os.path.dirname(d), exist_ok=True)
+                    if os.path.lexists(d):               # rename は上書きしてしまうので直前に確認
+                        raise OSError("移動先に同名がある（上書きしない）")
+                    os.rename(s, d)                      # 同じSDカード内の付け替え。別の領域なら失敗する
+                result = "OK" if op_done(o, lib, trash) else "NG"
+                note = "" if result == "OK" else "実行後の確認に失敗"
+            except OSError as e:
+                result, note = "NG", str(e)[:200]
+            log.write(f"{dt.datetime.now():%Y-%m-%d %H:%M:%S}\t{result}\t{o.op}\t{s}\t{d}\t{o.count}\t{o.size}\t{note}\n")
+            log.flush()
+            print(f"  {result}" + (f"  … {note}" if note else ""), flush=True)
+            if result == "NG":
+                print("NG が出たため、ここで止めました（これより後は実行していません）")
+                break
+            ok += 1
+    return ok
+
+
+def show_ops(ops):
+    for kind, label in (("MOVE", "作品フォルダへ移す"), ("RMDIR", "空になったフォルダを消す"),
+                        ("TRASH", "ゴミ箱へ移す")):
+        group = [o for o in ops if o.op == kind]
+        if not group:
+            continue
+        files = sum(o.count for o in group) if kind == "TRASH" else len(group) if kind == "MOVE" else 0
+        size = sum(o.size for o in group)
+        print(f"\n■ {label}（{len(group)}件" + (f"・{files}ファイル・{mb(size)}" if files else "") + "）")
+        for o in group:
+            extra = f" → {o.dst}" if kind == "MOVE" else f"（{o.count}ファイル {mb(o.size)}）" if kind == "TRASH" else ""
+            print(f"  {o.src}{extra}" + (f"\n      {o.memo}" if o.memo else ""))
+
+
+def apply_command(a, ap, stamp, inp):
+    plan = a.plan_file or find_plan()
+    if not plan or not os.path.isfile(plan):
+        ap.error("計画ファイルが見つかりません（/sdcard/Download に cleanup_plan*.tsv を置くか、パスを指定）")
+    plan_lib, ops = load_ops(plan)
+    lib = (a.library or plan_lib or "").rstrip("/")
+    if not os.path.isdir(lib):
+        ap.error(f"ライブラリが見つかりません: {lib}")
+    trash = a.trash or os.path.join(os.path.dirname(lib), TRASH_DIR, stamp)
+    print(f"計画: {plan}\nライブラリ: {lib}\nゴミ箱: {trash}")
+    show_ops(ops)
+    problems = check_ops(ops, lib, trash)
+    if problems:
+        print("\n計画時の一覧と食い違いがあるため、何もしていません:\n  " + "\n  ".join(problems))
+        return 2
+    print("\n事前確認: 計画どおり（すべての対象があり、移動先に同名はありません）")
+    if inp("\nこの内容で実行しますか？ [y/N] ").strip().lower() != "y":
+        print("中止しました（何も動かしていません）")
+        return 1
+    log_path = os.path.join(a.out_dir, f"apply_{stamp}.tsv")
+    print("\n===== 実行 =====")
+    ok = apply_ops(ops, lib, trash, log_path)
+    bad = [o.src for o in ops[:ok] if not op_done(o, lib, trash)]
+    print(f"\n===== 結果 =====\n実行 {ok}/{len(ops)}件\nログ: {log_path}")
+    print("照合: 計画どおり" if not bad else "照合で不一致:\n  " + "\n  ".join(bad))
+    if any(o.op == "TRASH" for o in ops[:ok]):
+        print(f"ゴミ箱の中身は、確認してからファイル管理アプリで削除してください: {trash}")
+    return 0 if ok == len(ops) and not bad else 2
+
+
 # ---------------------------------------------------------------- 入口
 def load_tsv(path, lib="LIBRARY", new="NEW"):
     dirs, files, newf = [], [], []
@@ -460,10 +634,12 @@ def default_out_dir():
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("cmd", choices=["plan", "run", "list"])
+    ap.add_argument("cmd", choices=["plan", "run", "list", "apply"])
+    ap.add_argument("plan_file", nargs="?", help="apply の計画ファイル（省略時は Download の最新の cleanup_plan*.tsv）")
     ap.add_argument("--library")
     ap.add_argument("--new")
     ap.add_argument("--tsv")
+    ap.add_argument("--trash", help="apply のゴミ箱（既定: ライブラリと同じ階層の _librarian_trash/日時）")
     ap.add_argument("--out-dir", default=default_out_dir(),
                     help="一覧・画面の記録・移動ログの出力先（既定: /sdcard/Download/librarian）")
     a = ap.parse_args(argv)
@@ -492,6 +668,8 @@ def main(argv=None):
 
 
 def run_command(a, ap, stamp, inp):
+    if a.cmd == "apply":
+        return apply_command(a, ap, stamp, inp)
     if a.cmd == "list":
         lib = a.library or pick_library(inp)
         if not os.path.isdir(lib):

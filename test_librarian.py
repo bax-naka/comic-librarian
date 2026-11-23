@@ -2,9 +2,11 @@
 import io
 import os
 import shutil
+import sys
 import tempfile
 import unittest
 from contextlib import redirect_stdout
+from unittest import mock
 
 import librarian as clo
 
@@ -168,6 +170,87 @@ class RulesFromProduction(unittest.TestCase):
         self.assertEqual([x.path for x in w], ["[A] 竜馬"])
         self.assertEqual(self.kind(w, "[A] 竜馬 第01巻.zip").kind, "要確認")   # 同じ巻（画像フォルダ）が既にある
         self.assertEqual(self.kind(w, "[A] 竜馬 第02巻.zip").kind, "追加")
+
+
+class ApplyPlan(unittest.TestCase):
+    """重複作品の判断 → 計画（tools/make_cleanup_plan.py）→ apply。"""
+
+    def setUp(self):
+        sys.path.insert(0, os.path.join(HERE, "tools"))
+        import make_cleanup_plan
+        self.mcp = make_cleanup_plan
+        self.t = tempfile.mkdtemp()
+        self.lib = os.path.join(self.t, "SD_comic")
+        self.trash = os.path.join(self.t, "_librarian_trash", "x")
+        mk(self.lib, "[A] 作品/[A] 作品 第01巻.zip", 10)
+        mk(self.lib, "[A] 作品/[A] 作品 第02巻.zip", 20)
+        mk(self.lib, "_unread/[A] 作品/[A] 作品 第01巻.zip", 11)
+        mk(self.lib, "[B] 本編/[B] 本編 第01巻.zip", 30)
+        mk(self.lib, "[B] 本編、続編/[B] 本編、続編 第01巻.zip", 40)
+        self.decisions = [("1", "残す（統合先）", "（直下）", "[A] 作品"),
+                          ("1", "削除", "_unread", "[A] 作品"),
+                          ("2", "残す（統合先）", "（直下）", "[B] 本編"),
+                          ("2", "統合先へ移して消す", "（直下）", "[B] 本編、続編")]
+
+    def tearDown(self):
+        shutil.rmtree(self.t)
+
+    def ops(self):
+        dec = os.path.join(self.t, "dec.tsv")
+        with open(dec, "w", encoding="utf-8") as f:
+            f.write("組\t判断\t場所\t作品フォルダ\n" + "".join("\t".join(r) + "\n" for r in self.decisions))
+        lst = os.path.join(self.t, "list.tsv")
+        clo.write_list(self.lib, lst)
+        dirs, files, _ = clo.load_tsv(lst)
+        ops, errors = self.mcp.make_ops(self.mcp.read_decisions(dec), dirs, files)
+        self.assertEqual(errors, [])
+        return ops
+
+    def test_plan_and_apply(self):
+        ops = self.ops()
+        self.assertEqual([o.op for o in ops], ["TRASH", "MOVE", "RMDIR"])
+        self.assertEqual(clo.check_ops(ops, self.lib, self.trash), [])
+        with redirect_stdout(io.StringIO()):
+            ok = clo.apply_ops(ops, self.lib, self.trash, os.path.join(self.t, "log.tsv"))
+        self.assertEqual(ok, 3)
+        self.assertTrue(all(clo.op_done(o, self.lib, self.trash) for o in ops))
+        self.assertFalse(os.path.exists(os.path.join(self.lib, "_unread", "[A] 作品")))
+        self.assertTrue(os.path.isfile(os.path.join(self.trash, "_unread/[A] 作品/[A] 作品 第01巻.zip")))
+        self.assertEqual(sorted(os.listdir(os.path.join(self.lib, "[B] 本編"))),
+                         ["[B] 本編 第01巻.zip", "[B] 本編、続編 第01巻.zip"])
+        self.assertFalse(os.path.exists(os.path.join(self.lib, "[B] 本編、続編")))
+
+    def test_changed_after_plan_does_nothing(self):
+        ops = self.ops()
+        mk(self.lib, "_unread/[A] 作品/[A] 作品 第03巻.zip", 5)          # 計画後に増えた
+        mk(self.lib, "[B] 本編、続編/メモ.txt", 1)                          # 移す対象以外が入った
+        mk(self.lib, "[B] 本編/[B] 本編、続編 第01巻.zip", 99)              # 移動先に同名ができた
+        self.assertEqual(len(clo.check_ops(ops, self.lib, self.trash)), 3)
+        plan = os.path.join(self.t, "cleanup_plan.tsv")
+        with open(plan, "w", encoding="utf-8") as f:
+            self.mcp.write_plan(ops, self.lib, "list.tsv", f)
+        with redirect_stdout(io.StringIO()), mock.patch("builtins.input", return_value="y"):
+            rc = clo.main(["apply", plan, "--trash", self.trash, "--out-dir", os.path.join(self.t, "out")])
+        self.assertEqual(rc, 2)
+        self.assertFalse(os.path.exists(self.trash))
+        self.assertEqual(os.path.getsize(os.path.join(self.lib, "[B] 本編/[B] 本編、続編 第01巻.zip")), 99)
+
+    def test_stops_at_first_ng(self):
+        ops = self.ops()
+        os.remove(os.path.join(self.lib, "_unread/[A] 作品/[A] 作品 第01巻.zip"))   # 1件目が失敗する
+        with redirect_stdout(io.StringIO()):
+            ok = clo.apply_ops(ops, self.lib, self.trash, os.path.join(self.t, "log.tsv"))
+        self.assertEqual(ok, 0)
+        self.assertTrue(os.path.isdir(os.path.join(self.lib, "[B] 本編、続編")))     # 2件目以降は実行しない
+
+    def test_merge_name_clash_is_an_error(self):
+        mk(self.lib, "[B] 本編/[B] 本編、続編 第01巻.zip", 1)
+        dec = os.path.join(self.t, "dec.tsv")
+        with open(dec, "w", encoding="utf-8") as f:
+            f.write("組\t判断\t場所\t作品フォルダ\n" + "".join("\t".join(r) + "\n" for r in self.decisions))
+        dirs, files = clo.scan(self.lib)
+        _, errors = self.mcp.make_ops(self.mcp.read_decisions(dec), dirs, files)
+        self.assertEqual(len(errors), 1)
 
 
 class Parse(unittest.TestCase):
