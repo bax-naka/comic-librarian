@@ -2,6 +2,7 @@
 """新刊フォルダの書庫ファイルを、ライブラリの作品フォルダへ振り分ける（試作）。
 
   python librarian.py plan --library LIB --new NEW     計画を表示するだけ（何も動かさない）
+  python librarian.py list                             ライブラリを選んで一覧TSVを書き出す
   python librarian.py run  --library LIB --new NEW     要確認を対話で選び、確認後に移動して照合する
   python librarian.py plan --tsv LIST.tsv              一覧TSV（LIBRARY/, NEW/ で始まる相対パス）から計画だけ作る
 
@@ -13,6 +14,7 @@ import datetime as dt
 import difflib
 import os
 import re
+import shutil
 import subprocess
 import sys
 import unicodedata
@@ -187,7 +189,8 @@ def make_plan(works, new_files):
     return items
 
 
-def show_plan(items, out=sys.stdout):
+def show_plan(items, out=None):
+    out = out or sys.stdout          # 呼び出し時点の sys.stdout（記録用の Tee）に書く
     for kind in ORDER:
         group = [i for i in items if i.kind == kind]
         if not group:
@@ -247,32 +250,54 @@ def new_files_in(new_root):
             if os.path.isfile(os.path.join(new_root, f))]
 
 
-def execute(items, lib, new, log_path):
+def mb(n):
+    return f"{n / 1024 / 1024:,.1f}MB"
+
+
+def execute(items, lib, new, log_path, progress=None):
+    """progress: 端末で実行中なら rsync の進捗（転送量・%・速度・残り時間）を表示する。"""
+    if progress is None:
+        progress = sys.stdout.isatty()
     todo = [i for i in items if i.kind in ("追加", "新規", "単巻")]
-    ok = ng = 0
-    with open(log_path, "w", encoding="utf-8") as log:
-        log.write("時刻\t結果\t判定\t元\t移動先\tサイズ\t備考\n")
-        for i in todo:
-            src = os.path.join(new, i.name)
-            ddir = os.path.join(lib, i.dest) if i.dest else lib
-            dst = os.path.join(ddir, i.name)
-            note = ""
-            if not os.path.isfile(src) or os.path.getsize(src) != i.size:
-                result, note = "NG", "新刊が見つからない／サイズが計画時と違う"
-            elif os.path.exists(dst):
-                result, note = "NG", "移動先に同名がある（上書きしない）"
-            else:
-                os.makedirs(ddir, exist_ok=True)
-                r = subprocess.run(["rsync", "-r", "--ignore-existing", "--remove-source-files",
-                                    src, ddir + "/"], capture_output=True, text=True)
-                moved = (os.path.isfile(dst) and os.path.getsize(dst) == i.size
-                         and not os.path.exists(src))
-                result = "OK" if r.returncode == 0 and moved else "NG"
-                note = "" if result == "OK" else (r.stderr.strip() or "移動後の確認に失敗")[:200]
-            ok += result == "OK"
-            ng += result == "NG"
-            log.write(f"{dt.datetime.now():%Y-%m-%d %H:%M:%S}\t{result}\t{i.kind}\t{src}\t{dst}\t{i.size}\t{note}\n")
-            print(f"  {result} {i.name}" + (f"  … {note}" if note else ""))
+    total = sum(i.size for i in todo) or 1
+    done = ok = ng = 0
+    # 移動中に画面が消えても止まらないように Termux のウェイクロックを取る
+    # （Galaxy の電池最適化の下で効くかは未確認。手順4.5で確認する）
+    wake = progress and shutil.which("termux-wake-lock")
+    if wake:
+        subprocess.run(["termux-wake-lock"])
+    try:
+        with open(log_path, "w", encoding="utf-8") as log:
+            log.write("時刻\t結果\t判定\t元\t移動先\tサイズ\t備考\n")
+            for n, i in enumerate(todo, 1):
+                print(f"[{n}/{len(todo)}] {i.name}（{mb(i.size)}）  全体 {done * 100 // total}%"
+                      f"（{mb(done)} / {mb(total)}）", flush=True)
+                src = os.path.join(new, i.name)
+                ddir = os.path.join(lib, i.dest) if i.dest else lib
+                dst = os.path.join(ddir, i.name)
+                note = ""
+                if not os.path.isfile(src) or os.path.getsize(src) != i.size:
+                    result, note = "NG", "新刊が見つからない／サイズが計画時と違う"
+                elif os.path.exists(dst):
+                    result, note = "NG", "移動先に同名がある（上書きしない）"
+                else:
+                    os.makedirs(ddir, exist_ok=True)
+                    cmd = ["rsync", "-r", "--ignore-existing", "--remove-source-files"]
+                    cmd += (["--info=progress2"] if progress else []) + [src, ddir + "/"]
+                    r = subprocess.run(cmd, stdout=None if progress else subprocess.DEVNULL,
+                                       stderr=subprocess.PIPE, text=True)
+                    moved = (os.path.isfile(dst) and os.path.getsize(dst) == i.size
+                             and not os.path.exists(src))
+                    result = "OK" if r.returncode == 0 and moved else "NG"
+                    note = "" if result == "OK" else (r.stderr.strip() or "移動後の確認に失敗")[:200]
+                ok += result == "OK"
+                ng += result == "NG"
+                done += i.size
+                log.write(f"{dt.datetime.now():%Y-%m-%d %H:%M:%S}\t{result}\t{i.kind}\t{src}\t{dst}\t{i.size}\t{note}\n")
+                print(f"  {result}" + (f"  … {note}" if note else ""), flush=True)
+    finally:
+        if wake:
+            subprocess.run(["termux-wake-unlock"])
     return ok, ng
 
 
@@ -292,6 +317,44 @@ def verify(items, lib, new):
     return problems
 
 
+# ---------------------------------------------------------------- 一覧の書き出し
+def detect_sd():
+    """termux-setup-storage が作る ~/storage/external-1 のリンク先から SD カードのルートを得る。"""
+    try:
+        target = os.readlink(os.path.expanduser("~/storage/external-1"))
+    except OSError:
+        return None
+    m = re.match(r"^(/storage/[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4})", target)
+    return m.group(1) if m else None
+
+
+def pick_library(inp=input):
+    cands = []
+    for root in (detect_sd(), "/sdcard"):
+        if not root or not os.path.isdir(root):
+            continue
+        for n in sorted(os.listdir(root)):
+            p = os.path.join(root, n)
+            if os.path.isdir(p) and not n.startswith(".") and n not in ("Android", "LOST.DIR"):
+                cands.append(p)
+    for k, p in enumerate(cands, 1):
+        print(f"  {k}: {p}")
+    ans = inp("ライブラリのフォルダ（番号、または絶対パス）> ").strip()
+    return cands[int(ans) - 1] if ans.isdigit() and 1 <= int(ans) <= len(cands) else ans
+
+
+def write_list(lib, out):
+    """ライブラリのフォルダ・ファイル一覧を load_tsv と同じ形式で書き出す（中身は読まない）。"""
+    dirs, files = scan(lib)
+    with open(out, "w", encoding="utf-8") as f:
+        f.write(f"# library: {lib}\n")
+        for d in sorted(dirs):
+            f.write(f"d\t0\t-\tLIBRARY/{d}\n")
+        for rel, size in sorted(files):
+            f.write(f"f\t{size}\t-\tLIBRARY/{rel}\n")
+    return len(dirs), len(files), sum(s for _, s in files)
+
+
 # ---------------------------------------------------------------- 入口
 def load_tsv(path, lib="LIBRARY", new="NEW"):
     dirs, files, newf = [], [], []
@@ -307,39 +370,97 @@ def load_tsv(path, lib="LIBRARY", new="NEW"):
     return dirs, files, newf
 
 
+class Tee:
+    """画面に出す内容を、同時に記録ファイルにも書く（引き渡し用）。"""
+
+    def __init__(self, stream, path):
+        self.stream, self.file = stream, open(path, "a", encoding="utf-8")
+
+    def write(self, text):
+        self.stream.write(text)
+        self.file.write(text)
+        return len(text)
+
+    def flush(self):
+        self.stream.flush()
+        self.file.flush()
+
+    def isatty(self):
+        return self.stream.isatty()
+
+    def note(self, text):
+        """入力された回答など、画面には既に出ているものを記録ファイルにだけ書く。"""
+        self.file.write(text + "\n")
+        self.file.flush()
+
+
+def default_out_dir():
+    # Termux のホームはファイルアプリから見えないため、引き渡しやすい Download に置く
+    base = "/sdcard/Download" if os.path.isdir("/sdcard/Download") else os.getcwd()
+    return os.path.join(base, "librarian")
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("cmd", choices=["plan", "run"])
+    ap.add_argument("cmd", choices=["plan", "run", "list"])
     ap.add_argument("--library")
     ap.add_argument("--new")
     ap.add_argument("--tsv")
-    ap.add_argument("--log-dir", default=os.path.expanduser("~/librarian_logs"))
+    ap.add_argument("--out-dir", default=default_out_dir(),
+                    help="一覧・画面の記録・移動ログの出力先（既定: /sdcard/Download/librarian）")
     a = ap.parse_args(argv)
     if a.tsv:
         if a.cmd != "plan":
             ap.error("--tsv は plan 専用です")
         dirs, files, newf = load_tsv(a.tsv)
-    else:
-        if not (a.library and a.new):
-            ap.error("--library と --new を指定してください")
-        dirs, files = scan(a.library)
-        newf = new_files_in(a.new)
-    items = make_plan(build_library(dirs, files), newf)
+        show_plan(make_plan(build_library(dirs, files), newf))
+        return 0
+    os.makedirs(a.out_dir, exist_ok=True)
+    stamp = f"{dt.datetime.now():%Y%m%d-%H%M%S}"
+    tee = Tee(sys.stdout, os.path.join(a.out_dir, f"{a.cmd}_{stamp}.txt"))
+    sys.stdout = tee
+
+    def inp(prompt):
+        ans = input(prompt)
+        tee.note(ans)
+        return ans
+
+    try:
+        return run_command(a, ap, stamp, inp)
+    finally:
+        sys.stdout = tee.stream
+        print(f"（画面の記録: {tee.file.name}）")
+        tee.file.close()
+
+
+def run_command(a, ap, stamp, inp):
+    if a.cmd == "list":
+        lib = a.library or pick_library(inp)
+        if not os.path.isdir(lib):
+            ap.error(f"フォルダが見つかりません: {lib}")
+        out = os.path.join(a.out_dir, f"list_{stamp}.tsv")
+        nd, nf, size = write_list(lib, out)
+        print(f"ライブラリ: {lib}\nフォルダ {nd}件・ファイル {nf}件・合計 {mb(size)}\n一覧: {out}")
+        return 0
+    if not (a.library and a.new):
+        ap.error("--library と --new を指定してください")
+    print(f"ライブラリ: {a.library}\n新刊フォルダ: {a.new}")
+    dirs, files = scan(a.library)
+    items = make_plan(build_library(dirs, files), new_files_in(a.new))
     show_plan(items)
     if a.cmd == "plan":
         return 0
-    ask_review(items)
+    ask_review(items, inp)
     print("\n===== 実行内容 =====")
     show_plan(items)
-    if input("\nこの内容で移動しますか？ [y/N] ").strip().lower() != "y":
+    if inp("\nこの内容で移動しますか？ [y/N] ").strip().lower() != "y":
         print("中止しました（何も動かしていません）")
         return 1
-    os.makedirs(a.log_dir, exist_ok=True)
-    log_path = os.path.join(a.log_dir, f"{dt.datetime.now():%Y%m%d-%H%M%S}.tsv")
+    log_path = os.path.join(a.out_dir, f"run_{stamp}.tsv")
     print("\n===== 移動 =====")
     ok, ng = execute(items, a.library, a.new, log_path)
     problems = verify(items, a.library, a.new)
-    print(f"\n===== 結果 =====\n移動 OK {ok}件 / NG {ng}件\nログ: {log_path}")
+    print(f"\n===== 結果 =====\n移動 OK {ok}件 / NG {ng}件\n移動ログ: {log_path}")
     print("照合: 計画どおり" if not problems else "照合で不一致:\n  " + "\n  ".join(problems))
     left = sorted(n for n, _ in new_files_in(a.new))
     if left:
