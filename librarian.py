@@ -13,6 +13,7 @@ import datetime as dt
 import difflib
 import os
 import re
+import shutil
 import subprocess
 import sys
 import unicodedata
@@ -247,32 +248,54 @@ def new_files_in(new_root):
             if os.path.isfile(os.path.join(new_root, f))]
 
 
-def execute(items, lib, new, log_path):
+def mb(n):
+    return f"{n / 1024 / 1024:,.1f}MB"
+
+
+def execute(items, lib, new, log_path, progress=None):
+    """progress: 端末で実行中なら rsync の進捗（転送量・%・速度・残り時間）を表示する。"""
+    if progress is None:
+        progress = sys.stdout.isatty()
     todo = [i for i in items if i.kind in ("追加", "新規", "単巻")]
-    ok = ng = 0
-    with open(log_path, "w", encoding="utf-8") as log:
-        log.write("時刻\t結果\t判定\t元\t移動先\tサイズ\t備考\n")
-        for i in todo:
-            src = os.path.join(new, i.name)
-            ddir = os.path.join(lib, i.dest) if i.dest else lib
-            dst = os.path.join(ddir, i.name)
-            note = ""
-            if not os.path.isfile(src) or os.path.getsize(src) != i.size:
-                result, note = "NG", "新刊が見つからない／サイズが計画時と違う"
-            elif os.path.exists(dst):
-                result, note = "NG", "移動先に同名がある（上書きしない）"
-            else:
-                os.makedirs(ddir, exist_ok=True)
-                r = subprocess.run(["rsync", "-r", "--ignore-existing", "--remove-source-files",
-                                    src, ddir + "/"], capture_output=True, text=True)
-                moved = (os.path.isfile(dst) and os.path.getsize(dst) == i.size
-                         and not os.path.exists(src))
-                result = "OK" if r.returncode == 0 and moved else "NG"
-                note = "" if result == "OK" else (r.stderr.strip() or "移動後の確認に失敗")[:200]
-            ok += result == "OK"
-            ng += result == "NG"
-            log.write(f"{dt.datetime.now():%Y-%m-%d %H:%M:%S}\t{result}\t{i.kind}\t{src}\t{dst}\t{i.size}\t{note}\n")
-            print(f"  {result} {i.name}" + (f"  … {note}" if note else ""))
+    total = sum(i.size for i in todo) or 1
+    done = ok = ng = 0
+    # 移動中に画面が消えても止まらないように Termux のウェイクロックを取る
+    # （Galaxy の電池最適化の下で効くかは未確認。手順4.5で確認する）
+    wake = progress and shutil.which("termux-wake-lock")
+    if wake:
+        subprocess.run(["termux-wake-lock"])
+    try:
+        with open(log_path, "w", encoding="utf-8") as log:
+            log.write("時刻\t結果\t判定\t元\t移動先\tサイズ\t備考\n")
+            for n, i in enumerate(todo, 1):
+                print(f"[{n}/{len(todo)}] {i.name}（{mb(i.size)}）  全体 {done * 100 // total}%"
+                      f"（{mb(done)} / {mb(total)}）", flush=True)
+                src = os.path.join(new, i.name)
+                ddir = os.path.join(lib, i.dest) if i.dest else lib
+                dst = os.path.join(ddir, i.name)
+                note = ""
+                if not os.path.isfile(src) or os.path.getsize(src) != i.size:
+                    result, note = "NG", "新刊が見つからない／サイズが計画時と違う"
+                elif os.path.exists(dst):
+                    result, note = "NG", "移動先に同名がある（上書きしない）"
+                else:
+                    os.makedirs(ddir, exist_ok=True)
+                    cmd = ["rsync", "-r", "--ignore-existing", "--remove-source-files"]
+                    cmd += (["--info=progress2"] if progress else []) + [src, ddir + "/"]
+                    r = subprocess.run(cmd, stdout=None if progress else subprocess.DEVNULL,
+                                       stderr=subprocess.PIPE, text=True)
+                    moved = (os.path.isfile(dst) and os.path.getsize(dst) == i.size
+                             and not os.path.exists(src))
+                    result = "OK" if r.returncode == 0 and moved else "NG"
+                    note = "" if result == "OK" else (r.stderr.strip() or "移動後の確認に失敗")[:200]
+                ok += result == "OK"
+                ng += result == "NG"
+                done += i.size
+                log.write(f"{dt.datetime.now():%Y-%m-%d %H:%M:%S}\t{result}\t{i.kind}\t{src}\t{dst}\t{i.size}\t{note}\n")
+                print(f"  {result}" + (f"  … {note}" if note else ""), flush=True)
+    finally:
+        if wake:
+            subprocess.run(["termux-wake-unlock"])
     return ok, ng
 
 
@@ -292,6 +315,44 @@ def verify(items, lib, new):
     return problems
 
 
+# ---------------------------------------------------------------- 一覧の書き出し
+def detect_sd():
+    """termux-setup-storage が作る ~/storage/external-1 のリンク先から SD カードのルートを得る。"""
+    try:
+        target = os.readlink(os.path.expanduser("~/storage/external-1"))
+    except OSError:
+        return None
+    m = re.match(r"^(/storage/[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4})", target)
+    return m.group(1) if m else None
+
+
+def pick_library(inp=input):
+    cands = []
+    for root in (detect_sd(), "/sdcard"):
+        if not root or not os.path.isdir(root):
+            continue
+        for n in sorted(os.listdir(root)):
+            p = os.path.join(root, n)
+            if os.path.isdir(p) and not n.startswith(".") and n not in ("Android", "LOST.DIR"):
+                cands.append(p)
+    for k, p in enumerate(cands, 1):
+        print(f"  {k}: {p}")
+    ans = inp("ライブラリのフォルダ（番号、または絶対パス）> ").strip()
+    return cands[int(ans) - 1] if ans.isdigit() and 1 <= int(ans) <= len(cands) else ans
+
+
+def write_list(lib, out):
+    """ライブラリのフォルダ・ファイル一覧を load_tsv と同じ形式で書き出す（中身は読まない）。"""
+    dirs, files = scan(lib)
+    with open(out, "w", encoding="utf-8") as f:
+        f.write(f"# library: {lib}\n")
+        for d in sorted(dirs):
+            f.write(f"d\t0\t-\tLIBRARY/{d}\n")
+        for rel, size in sorted(files):
+            f.write(f"f\t{size}\t-\tLIBRARY/{rel}\n")
+    return len(dirs), len(files), sum(s for _, s in files)
+
+
 # ---------------------------------------------------------------- 入口
 def load_tsv(path, lib="LIBRARY", new="NEW"):
     dirs, files, newf = [], [], []
@@ -309,12 +370,22 @@ def load_tsv(path, lib="LIBRARY", new="NEW"):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("cmd", choices=["plan", "run"])
+    ap.add_argument("cmd", choices=["plan", "run", "list"])
     ap.add_argument("--library")
     ap.add_argument("--new")
     ap.add_argument("--tsv")
+    ap.add_argument("--out", help="list の出力先（既定: /sdcard/Download/librarian_list.tsv）")
     ap.add_argument("--log-dir", default=os.path.expanduser("~/librarian_logs"))
     a = ap.parse_args(argv)
+    if a.cmd == "list":
+        lib = a.library or pick_library()
+        if not os.path.isdir(lib):
+            ap.error(f"フォルダが見つかりません: {lib}")
+        out = a.out or ("/sdcard/Download/librarian_list.tsv" if os.path.isdir("/sdcard/Download")
+                        else "librarian_list.tsv")
+        nd, nf, size = write_list(lib, out)
+        print(f"フォルダ {nd}件・ファイル {nf}件・合計 {mb(size)}\n出力: {out}")
+        return 0
     if a.tsv:
         if a.cmd != "plan":
             ap.error("--tsv は plan 専用です")

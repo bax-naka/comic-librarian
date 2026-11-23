@@ -11,9 +11,11 @@ gh auth login
 gh repo clone bax-naka/comic-librarian ~/comic-librarian && cd ~/comic-librarian
 python librarian.py plan --library <ライブラリ> --new <新刊フォルダ>   # 計画を表示するだけ
 python librarian.py run  --library <ライブラリ> --new <新刊フォルダ>   # 要確認を選択 → y で移動 → 自動照合
+python librarian.py list                                                # ライブラリを選んで一覧TSVを書き出す（中身は読まない）
 ```
 
 - `run` は要確認の新刊を1件ずつ選ばせる（候補番号／`n`＝新規作品として直下へ／Enter＝見送り）
+- 移動中は件数・サイズ・全体の%と、rsync の進捗（転送量・%・速度・残り時間）を表示
 - ログは `~/librarian_logs/日時.tsv`（日時・結果・元・移動先・サイズ）
 
 ## 判定

@@ -82,6 +82,23 @@ class Execute(unittest.TestCase):
         self.assertEqual((i.kind, i.dest), ("新規", "[A] 作品 甲（誤記）"))
 
 
+class ListOutput(unittest.TestCase):
+    def test_roundtrip(self):
+        """list の出力を load_tsv で読み戻すと、実フォルダを scan したのと同じ内容になる。"""
+        t = tempfile.mkdtemp()
+        try:
+            lib = os.path.join(t, "LIB")
+            mk(lib, "_S/[A] 作品/[A] 作品 第01巻.zip", 10)
+            mk(lib, "[B] 単独/[B] 単独 第01巻.rar", 20)
+            out = os.path.join(t, "list.tsv")
+            clo.write_list(lib, out)
+            dirs, files, newf = clo.load_tsv(out)
+            sd, sf = clo.scan(lib)
+            self.assertEqual((sorted(dirs), sorted(files), newf), (sorted(sd), sorted(sf), []))
+        finally:
+            shutil.rmtree(t)
+
+
 class Parse(unittest.TestCase):
     def test_variants(self):
         p = clo.parse_name("[蝉川夏哉×碓井ツカサ] 異世界居酒屋｢げん｣ 第01 14巻")
