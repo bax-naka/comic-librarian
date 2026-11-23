@@ -419,9 +419,10 @@ def write_list(lib, out):
 # 計画TSV（tools/make_cleanup_plan.py が作る）：操作・対象・移動先・ファイル数・バイト数・メモ。
 # パスはライブラリ基準。どれも同じSDカード内の名前の付け替えで、中身はコピーしない。
 #   MOVE   ファイルを別の作品フォルダへ移す（上書きしない）
+#   MOVEDIR フォルダごと別の作品フォルダの中へ移す（続編・別作画をサブフォルダにまとめる）
 #   RMDIR  MOVE で空になったフォルダを消す（空でなければ消えない）
 #   TRASH  フォルダごとゴミ箱（ライブラリの外・同じSDカード）へ移す。完全には消さない
-PLAN_OPS = ("MOVE", "RMDIR", "TRASH")
+PLAN_OPS = ("MOVE", "MOVEDIR", "RMDIR", "TRASH")
 TRASH_DIR = "_librarian_trash"
 
 
@@ -468,7 +469,7 @@ def tree_stat(path):
 
 
 def op_dest(o, lib, trash):
-    return (os.path.join(lib, o.dst) if o.op == "MOVE" else
+    return (os.path.join(lib, o.dst) if o.op in ("MOVE", "MOVEDIR") else
             os.path.join(trash, o.src) if o.op == "TRASH" else "")
 
 
@@ -490,6 +491,13 @@ def check_ops(ops, lib, trash):
                 problems.append(f"移動先に同名がある: {o.dst}")
         elif not os.path.isdir(s):
             problems.append(f"フォルダが無い: {o.src}")
+        elif o.op == "MOVEDIR":
+            if tree_stat(s) != (o.count, o.size):
+                problems.append(f"中身が計画時と違う（{o.count}件 {mb(o.size)} のはず）: {o.src}")
+            if not os.path.isdir(os.path.dirname(d)):
+                problems.append(f"移動先のフォルダが無い: {os.path.dirname(o.dst)}")
+            elif os.path.lexists(d):
+                problems.append(f"移動先に同名がある: {o.dst}")
         elif o.op == "RMDIR":
             if set(os.listdir(s)) != moves_from.get(o.src, set()):
                 problems.append(f"移すファイル以外が入っている: {o.src}")
@@ -507,7 +515,7 @@ def op_done(o, lib, trash):
         return False
     if o.op == "MOVE":
         return os.path.isfile(d) and os.path.getsize(d) == o.size
-    if o.op == "TRASH":
+    if o.op in ("MOVEDIR", "TRASH"):
         return os.path.isdir(d) and tree_stat(d) == (o.count, o.size)
     return True
 
@@ -544,16 +552,19 @@ def apply_ops(ops, lib, trash, log_path):
 
 
 def show_ops(ops):
-    for kind, label in (("MOVE", "作品フォルダへ移す"), ("RMDIR", "空になったフォルダを消す"),
+    for kind, label in (("MOVE", "作品フォルダへ移す"), ("MOVEDIR", "フォルダごと作品フォルダの中へ移す"),
+                        ("RMDIR", "空になったフォルダを消す"),
                         ("TRASH", "ゴミ箱へ移す")):
         group = [o for o in ops if o.op == kind]
         if not group:
             continue
-        files = sum(o.count for o in group) if kind == "TRASH" else len(group) if kind == "MOVE" else 0
+        files = sum(o.count for o in group) if kind in ("MOVEDIR", "TRASH") else len(group) if kind == "MOVE" else 0
         size = sum(o.size for o in group)
         print(f"\n■ {label}（{len(group)}件" + (f"・{files}ファイル・{mb(size)}" if files else "") + "）")
         for o in group:
-            extra = f" → {o.dst}" if kind == "MOVE" else f"（{o.count}ファイル {mb(o.size)}）" if kind == "TRASH" else ""
+            extra = (f" → {o.dst}" if kind == "MOVE" else
+                     f"（{o.count}ファイル {mb(o.size)}）\n      → {o.dst}" if kind == "MOVEDIR" else
+                     f"（{o.count}ファイル {mb(o.size)}）" if kind == "TRASH" else "")
             print(f"  {o.src}{extra}" + (f"\n      {o.memo}" if o.memo else ""))
 
 

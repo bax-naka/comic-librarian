@@ -187,10 +187,14 @@ class ApplyPlan(unittest.TestCase):
         mk(self.lib, "_unread/[A] 作品/[A] 作品 第01巻.zip", 11)
         mk(self.lib, "[B] 本編/[B] 本編 第01巻.zip", 30)
         mk(self.lib, "[B] 本編、続編/[B] 本編、続編 第01巻.zip", 40)
+        mk(self.lib, "_A/[C] 物語/[C] 物語 第01巻.zip", 50)
+        mk(self.lib, "[C] 物語 外伝/[C] 物語 外伝 第01巻.zip", 60)
         self.decisions = [("1", "残す（統合先）", "（直下）", "[A] 作品"),
                           ("1", "削除", "_unread", "[A] 作品"),
                           ("2", "残す（統合先）", "（直下）", "[B] 本編"),
-                          ("2", "統合先へ移して消す", "（直下）", "[B] 本編、続編")]
+                          ("2", "統合先へ移して消す", "（直下）", "[B] 本編、続編"),
+                          ("3", "残す（統合先）", "_A", "[C] 物語"),
+                          ("3", "統合先のサブフォルダへ", "（直下）", "[C] 物語 外伝")]
 
     def tearDown(self):
         shutil.rmtree(self.t)
@@ -208,24 +212,31 @@ class ApplyPlan(unittest.TestCase):
 
     def test_plan_and_apply(self):
         ops = self.ops()
-        self.assertEqual([o.op for o in ops], ["TRASH", "MOVE", "RMDIR"])
+        self.assertEqual([o.op for o in ops], ["TRASH", "MOVE", "RMDIR", "MOVEDIR"])
         self.assertEqual(clo.check_ops(ops, self.lib, self.trash), [])
         with redirect_stdout(io.StringIO()):
             ok = clo.apply_ops(ops, self.lib, self.trash, os.path.join(self.t, "log.tsv"))
-        self.assertEqual(ok, 3)
+        self.assertEqual(ok, 4)
         self.assertTrue(all(clo.op_done(o, self.lib, self.trash) for o in ops))
         self.assertFalse(os.path.exists(os.path.join(self.lib, "_unread", "[A] 作品")))
         self.assertTrue(os.path.isfile(os.path.join(self.trash, "_unread/[A] 作品/[A] 作品 第01巻.zip")))
         self.assertEqual(sorted(os.listdir(os.path.join(self.lib, "[B] 本編"))),
                          ["[B] 本編 第01巻.zip", "[B] 本編、続編 第01巻.zip"])
         self.assertFalse(os.path.exists(os.path.join(self.lib, "[B] 本編、続編")))
+        self.assertTrue(os.path.isfile(os.path.join(self.lib, "_A/[C] 物語/[C] 物語 外伝/[C] 物語 外伝 第01巻.zip")))
+        self.assertFalse(os.path.exists(os.path.join(self.lib, "[C] 物語 外伝")))
+        # サブフォルダは別の作品として照合される（外伝の新刊は外伝へ）
+        d, f = clo.scan(self.lib)
+        it = clo.make_plan(clo.build_library(d, f), [("[C] 物語 外伝 第02巻.zip", 1)])[0]
+        self.assertEqual((it.kind, it.dest), ("追加", "_A/[C] 物語/[C] 物語 外伝"))
 
     def test_changed_after_plan_does_nothing(self):
         ops = self.ops()
         mk(self.lib, "_unread/[A] 作品/[A] 作品 第03巻.zip", 5)          # 計画後に増えた
         mk(self.lib, "[B] 本編、続編/メモ.txt", 1)                          # 移す対象以外が入った
         mk(self.lib, "[B] 本編/[B] 本編、続編 第01巻.zip", 99)              # 移動先に同名ができた
-        self.assertEqual(len(clo.check_ops(ops, self.lib, self.trash)), 3)
+        mk(self.lib, "_A/[C] 物語/[C] 物語 外伝/x.zip", 1)                  # サブフォルダの移動先に同名ができた
+        self.assertEqual(len(clo.check_ops(ops, self.lib, self.trash)), 4)
         plan = os.path.join(self.t, "cleanup_plan.tsv")
         with open(plan, "w", encoding="utf-8") as f:
             self.mcp.write_plan(ops, self.lib, "list.tsv", f)

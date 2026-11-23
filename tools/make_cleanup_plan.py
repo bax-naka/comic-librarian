@@ -7,6 +7,7 @@
   残す（統合先）       … 各組に1つだけ
   削除                 … フォルダごとゴミ箱へ（TRASH）
   統合先へ移して消す   … 中のファイルを統合先へ移し（MOVE）、空になったフォルダを消す（RMDIR）
+  統合先のサブフォルダへ … フォルダごと統合先の中へ移す（MOVEDIR。続編・別作画など巻番号が重なるもの）
 一覧.tsv：librarian.py list の出力（1行目の "# library:" を計画に引き継ぐ）
 """
 import collections
@@ -16,7 +17,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 import librarian as L  # noqa: E402
 
-KEEP, TRASH, MERGE = "残す（統合先）", "削除", "統合先へ移して消す"
+KEEP, TRASH, MERGE, SUB = "残す（統合先）", "削除", "統合先へ移して消す", "統合先のサブフォルダへ"
 
 
 def read_decisions(path):
@@ -52,6 +53,11 @@ def make_ops(groups, dirs, files):
                 errors.append(f"組{g}: 一覧に無いフォルダ: {rel}")
             elif dec == TRASH:
                 ops.append(L.Op("TRASH", rel, "", len(under[rel]), sum(s for _, s in under[rel]), memo))
+            elif dec == SUB:
+                dst = f"{tgt}/{rel.rsplit('/', 1)[-1]}"
+                if dst in dirset or dst[len(tgt) + 1:] in have:
+                    errors.append(f"組{g}: 統合先に同名がある: {dst}")
+                ops.append(L.Op("MOVEDIR", rel, dst, len(under[rel]), sum(s for _, s in under[rel]), memo))
             elif dec == MERGE:
                 if any(d.startswith(rel + "/") for d in dirset):
                     errors.append(f"組{g}: サブフォルダがあるため手で確認してください: {rel}")
