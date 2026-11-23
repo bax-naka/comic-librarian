@@ -18,6 +18,8 @@ python librarian.py list                                                # ライ
 - 移動中は件数・サイズ・全体の%と、rsync の進捗（転送量・%・速度・残り時間）を表示
 - ログは `~/librarian_logs/日時.tsv`（日時・結果・元・移動先・サイズ）
 
+端末の事前確認（ライブラリには触れない）：`bash tools/check_storage.sh`（`--sleep` で画面を消しても止まらないかも確認）
+
 ## 判定
 
 | 判定 | 動作 |
