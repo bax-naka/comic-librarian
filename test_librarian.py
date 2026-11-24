@@ -286,6 +286,68 @@ class Parse(unittest.TestCase):
         self.assertEqual(clo.norm("異世界居酒屋｢げん｣"), clo.norm("異世界居酒屋「げん」"))
         self.assertEqual(clo.parse_name("[あろえ×立山鈴] t").authors, clo.parse_name("[立山鈴×あろえ] t").authors)
 
+    def test_note_after_volume(self):
+        # 巻のあとの注記は作品名に含めない（本番の新刊にあった表記）
+        base = clo.parse_name("[九我山レキ×くろかた×KeG] 治癒魔法の間違った使い方 ～戦場を駆ける回復要員～ 第01巻")
+        for stem in ["[九我山レキ×くろかた×KeG] 治癒魔法の間違った使い方 ～戦場を駆ける回復要員～ 第03巻 雑誌寄せ集め",
+                     "[九我山レキ×くろかた×KeG] 治癒魔法の間違った使い方 ～戦場を駆ける回復要員～ 第03巻【特装版】",
+                     "[九我山レキ×くろかた×KeG] 治癒魔法の間違った使い方 ～戦場を駆ける回復要員～ 第03巻s fix",
+                     "[九我山レキ×くろかた×KeG] 治癒魔法の間違った使い方 ～戦場を駆ける回復要員～ 第03巻ｗ"]:
+            p = clo.parse_name(stem)
+            self.assertEqual((p.title, p.v1), (base.title, 3), stem)
+            self.assertEqual(clo.work_folder_name(stem), "[九我山レキ×くろかた×KeG] 治癒魔法の間違った使い方 ～戦場を駆ける回復要員～")
+        # 作品名の中の「第n」は巻と取り違えない（最後の「第n巻」を巻とみなす）
+        p = clo.parse_name("[x] 魔王軍第13部隊の日常 第02巻")
+        self.assertEqual((p.title, p.v1), (clo.norm("魔王軍第13部隊の日常"), 2))
+        self.assertEqual(clo.work_folder_name("[x] 魔王軍第13部隊の日常 第02巻 fix"), "[x] 魔王軍第13部隊の日常")
+
+
+class ReviewGroups(unittest.TestCase):
+    """要確認は作者・作品名ごとにまとめて1回だけ選ぶ。"""
+
+    def setUp(self):
+        self.t = tempfile.mkdtemp()
+        self.lib = os.path.join(self.t, "LIB")
+        mk(self.lib, "_A/[びび×五示正司] ひとりぼっちの異世界攻略/[びび×五示正司] ひとりぼっちの異世界攻略 第02巻.zip", 1)
+        mk(self.lib, "[氷純] 十年目/[氷純] 十年目 第01巻.zip", 5)
+        mk(self.lib, "[氷純] 十年目/[氷純] 十年目 第03巻w.zip", 5)
+
+    def tearDown(self):
+        shutil.rmtree(self.t)
+
+    def review(self, new, answer):
+        d, f = clo.scan(self.lib)
+        items = clo.make_plan(clo.build_library(d, f), new)
+        asked = []
+        with redirect_stdout(io.StringIO()):
+            clo.ask_review(items, inp=lambda q: asked.append(q) or answer)
+        return {i.name: (i.kind, i.dest) for i in items}, len(asked)
+
+    def test_new_work_once_for_all_volumes(self):
+        new = [(f"[いわとびひろ×長尾隆生] ひとりぼっちの異世界放浪 第0{v}巻.zip", 1) for v in (1, 2, 3)]
+        new.append(("[いわとびひろ×長尾隆生] ひとりぼっちの異世界放浪 第04巻 雑誌寄せ集め.zip", 1))
+        got, asked = self.review(new, "n")
+        self.assertEqual(asked, 1)
+        self.assertEqual(set(got.values()), {("新規", "[いわとびひろ×長尾隆生] ひとりぼっちの異世界放浪")})
+
+    def test_add_skips_volumes_the_chosen_work_already_has(self):
+        new = [(f"[いわとびひろ×長尾隆生] ひとりぼっちの異世界放浪 第0{v}巻.zip", 1) for v in (1, 2)]
+        got, asked = self.review(new, "1")
+        self.assertEqual(asked, 1)
+        self.assertEqual(got["[いわとびひろ×長尾隆生] ひとりぼっちの異世界放浪 第01巻.zip"],
+                         ("追加", "_A/[びび×五示正司] ひとりぼっちの異世界攻略"))
+        self.assertEqual(got["[いわとびひろ×長尾隆生] ひとりぼっちの異世界放浪 第02巻.zip"][0], "見送り")
+
+    def test_same_volume_group(self):
+        # 同名がある巻は追加せず、同名でない巻だけ「既存も残して追加」
+        got, asked = self.review([("[氷純] 十年目 第01巻.zip", 9), ("[氷純] 十年目 第03巻.rar", 9)], "1")
+        self.assertEqual(asked, 1)
+        self.assertEqual(got["[氷純] 十年目 第01巻.zip"][0], "見送り")
+        self.assertEqual(got["[氷純] 十年目 第03巻.rar"], ("追加", "[氷純] 十年目"))
+        # すべて同名なら聞かずに見送り
+        got, asked = self.review([("[氷純] 十年目 第01巻.zip", 9)], "1")
+        self.assertEqual((asked, got["[氷純] 十年目 第01巻.zip"][0]), (0, "見送り"))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -27,9 +27,12 @@ ARCHIVE_EXT = {".zip", ".rar", ".cbz", ".cbr", ".7z"}
 # 日本語の文字に挟まれた x/X も区切りとみなす（英字名の中の x は区切らない）
 AUTHOR_SEP = re.compile(r"[×✕／/、，,&＆]|(?<=[^\x00-\x7F])[xX](?=[^\x00-\x7F])")
 HEAD_RE = re.compile(r"^\s*\[(?P<auth>[^\]]*)\]\s*(?P<rest>.*)$")
-# 巻番号のあとの記号（w・s のほか、本番ライブラリには b もある）は英字1〜2文字まで許す
+# 巻番号のあとの記号（w・s のほか、本番ライブラリには b もある）は英字1〜2文字まで許す。
+# 「巻」のあとの注記（"第04巻 雑誌寄せ集め" "第03巻【特装版】" "第01巻 fix" など）は作品名に含めない。
+# 作品名は最後の「第n巻」の手前まで（作品名の中に "第2部" などがあっても巻と取り違えない）
 VOL_RE = re.compile(
-    r"^(?P<title>.*?)\s*第\s*(?P<v1>\d+)\s*(?:(?P<sep>[-~～〜\s])\s*(?P<v2>\d*))?\s*巻?\s*(?P<sfx>[A-Za-z]{1,2})?\s*$")
+    r"^(?P<title>.*)第\s*(?P<v1>\d+)\s*(?:(?P<sep>[-~～〜\s])\s*(?P<v2>\d*))?\s*"
+    r"(?:巻(?:\s*(?P<sfx>[A-Za-z]{1,2})(?![A-Za-z]))?(?:\s*(?P<note>\S.*?))?|(?P<sfx2>[A-Za-z]{1,2}))?\s*$")
 SINGLE_DIR = "_single"
 
 # 判定のしきい値（暫定。本番ライブラリの一覧で調整する）
@@ -79,8 +82,9 @@ def volumes(p: Parsed) -> set:
 
 
 def work_folder_name(stem: str) -> str:
-    """新規作品のフォルダ名：ファイル名から巻表記より前を取る。"""
-    return re.split(r"\s*第\s*\d", stem)[0].strip().rstrip(".")
+    """新規作品のフォルダ名：ファイル名から巻表記（と、そのあとの注記）より前を取る。"""
+    m = VOL_RE.match(stem)
+    return (m.group("title") if m else stem).strip().rstrip(".")
 
 
 def split_ext(name):
@@ -234,30 +238,55 @@ def show_plan(items, out=None):
 
 
 # ---------------------------------------------------------------- 実行
+def review_groups(items):
+    """要確認を、作者（順不同）と作品名が同じものごとにまとめる。同じ作品の巻は候補も理由の種類も同じになる。"""
+    groups = {}
+    for i in items:
+        if i.kind == "要確認":
+            p = parse_name(split_ext(i.name)[0])
+            groups.setdefault((p.authors, p.title), []).append(i)
+    return list(groups.values())
+
+
 def ask_review(items, inp=input):
-    """要確認を1件ずつ選ばせる。Enter は見送り。"""
-    for i in [x for x in items if x.kind == "要確認"]:
-        print(f"\n[要確認] {i.name}\n  理由: {i.reason}")
-        for n in i.existing[:5]:
-            print(f"  既存: {n}")
+    """要確認を作品ごとにまとめて選ばせ、選んだ内容をその作品の全巻に当てはめる。Enter は見送り。"""
+    for group in review_groups(items):
+        first = group[0]
+        dup = bool(first.existing)                       # 「同じ巻が既にある」の組
+        print(f"\n[要確認] {work_folder_name(split_ext(first.name)[0])}（{len(group)}件）")
+        print(f"  理由: {re.sub(r'（[0-9]+件）$', '', first.reason)}")
+        for i in group:
+            print(f"  ・{i.name}")
+            for n in i.existing[:3]:
+                print(f"      既存: {n}" + ("（同名のため追加しない）" if n == i.name else ""))
+        addable = [i for i in group if i.name not in i.existing]
         opts = {}
-        dup = bool(i.existing)
-        for k, w in enumerate(i.cands, 1):
-            if dup and any(n == i.name for n in i.existing):
-                continue                                      # 同名があるなら追加できない
-            label = "この作品に追加（既存も残す）" if dup else "この作品に追加"
-            opts[str(k)] = ("追加", w.path)
-            print(f"  {k}: {label} … {w.path}")
+        if addable:
+            for k, w in enumerate(first.cands, 1):
+                label = "この作品に追加（既存も残す）" if dup else "この作品に追加"
+                opts[str(k)] = ("追加", w)
+                print(f"  {k}: {label} … {w.path}")
         if not dup:
-            opts["n"] = ("新規", work_folder_name(split_ext(i.name)[0]))
+            opts["n"] = ("新規", work_folder_name(split_ext(first.name)[0]))
             print(f"  n: 新規作品としてライブラリ直下へ … {opts['n'][1]}")
-        print("  Enter: 見送る（新刊フォルダに残す）")
-        ans = inp("  選択> ").strip().lower()
-        if ans in opts:
-            i.kind, i.dest = opts[ans]
-            i.reason = "要確認で選択"
+        if opts:
+            print("  Enter: 見送る（新刊フォルダに残す）")
+            ans = inp("  選択> ").strip().lower()
         else:
-            i.kind, i.reason = "見送り", "要確認で見送り"
+            print("  （すべて同名が既にあるため見送り）")
+            ans = ""
+        for i in group:
+            kind, dest = opts.get(ans, ("見送り", None))
+            if kind == "追加" and i.name in i.existing:
+                kind = "見送り"
+            elif kind == "追加" and not dup and any(volumes(parse_name(split_ext(i.name)[0])) & volumes(fp)
+                                                   for _, _, fp in dest.files):
+                print(f"  ※ 選んだ作品に同じ巻があるため見送り: {i.name}")
+                kind = "見送り"
+            if kind == "見送り":
+                i.kind, i.reason = "見送り", "要確認で見送り"
+            else:
+                i.kind, i.dest, i.reason = kind, dest.path if kind == "追加" else dest, "要確認で選択"
 
 
 def scan(root):
