@@ -127,11 +127,55 @@ class Picker(unittest.TestCase):
             shutil.rmtree(t)
 
 
+class RulesFromProduction(unittest.TestCase):
+    """本番ライブラリの一覧での測定（tools/evaluate.py）から入れた規則。"""
+
+    def lib(self, paths):
+        dirs, files = set(), []
+        for p in paths:
+            parts = p.split("/")
+            for i in range(1, len(parts)):
+                dirs.add("/".join(parts[:i]))
+            if not p.endswith("/"):
+                files.append((p, 100))
+        return clo.build_library(sorted(dirs), files)
+
+    def kind(self, works, name):
+        return clo.make_plan(works, [(name, 1)])[0]
+
+    def test_latin_x_separator(self):
+        w = self.lib(["_A/[采芽杏奈x三島千廣] 錬金貴族の領地経営/[采芽杏奈x三島千廣] 錬金貴族の領地経営 第06巻.zip"])
+        self.assertEqual(self.kind(w, "[采芽杏奈×三島千廣] 錬金貴族の領地経営 第07巻.zip").kind, "追加")
+        self.assertEqual(clo.parse_name("[Orenge30×ReiOn] t").authors, frozenset({"orenge30", "reion"}))
+
+    def test_joined_author_key(self):
+        w = self.lib(["[わんたちわ×小太郎] 無人島でエルフと共同生活/[わんたちわ×小太郎] 無人島でエルフと共同生活 第09巻.zip"])
+        self.assertEqual(self.kind(w, "[わんた×ちわ小太郎] 無人島でエルフと共同生活 第10巻.zip").kind, "追加")
+
+    def test_partial_author_overlap_goes_to_review(self):
+        # 同じ原作の別作画：原作者だけが重なる → 自動で入れない
+        w = self.lib(["[樋辻臥命×クニくん] 放課後の迷宮冒険者/[樋辻臥命×クニくん] 放課後の迷宮冒険者 第01巻.zip"])
+        self.assertEqual(self.kind(w, "[あび×樋辻臥命×かれい] 放課後の迷宮冒険者 第03巻.zip").kind, "要確認")
+
+    def test_rival_with_weaker_authors_is_ignored(self):
+        w = self.lib(["[樋辻臥命×クニくん] 放課後の迷宮冒険者/[樋辻臥命×クニくん] 放課後の迷宮冒険者 第01巻.zip",
+                      "[あび×樋辻臥命×かれい] 放課後の迷宮冒険者/[あび×樋辻臥命×かれい] 放課後の迷宮冒険者 第02巻.zip"])
+        it = self.kind(w, "[あび×樋辻臥命×かれい] 放課後の迷宮冒険者 第03巻.zip")
+        self.assertEqual((it.kind, it.dest), ("追加", "[あび×樋辻臥命×かれい] 放課後の迷宮冒険者"))
+
+    def test_volume_folder_is_not_a_work(self):
+        w = self.lib(["[A] 竜馬/[A] 竜馬 第01巻/001.jpg"])
+        self.assertEqual([x.path for x in w], ["[A] 竜馬"])
+        self.assertEqual(self.kind(w, "[A] 竜馬 第01巻.zip").kind, "要確認")   # 同じ巻（画像フォルダ）が既にある
+        self.assertEqual(self.kind(w, "[A] 竜馬 第02巻.zip").kind, "追加")
+
+
 class Parse(unittest.TestCase):
     def test_variants(self):
         p = clo.parse_name("[蝉川夏哉×碓井ツカサ] 異世界居酒屋｢げん｣ 第01 14巻")
         self.assertEqual(clo.volumes(p), set(range(1, 15)))
         self.assertEqual(clo.parse_name("[x] 題 第02巻w").v1, 2)
+        self.assertEqual(clo.parse_name("[x] 題 第21巻b").v1, 21)          # 本番ライブラリにある b 付き
         self.assertEqual(clo.norm("異世界居酒屋｢げん｣"), clo.norm("異世界居酒屋「げん」"))
         self.assertEqual(clo.parse_name("[あろえ×立山鈴] t").authors, clo.parse_name("[立山鈴×あろえ] t").authors)
 

@@ -21,10 +21,13 @@ import unicodedata
 from dataclasses import dataclass, field
 
 ARCHIVE_EXT = {".zip", ".rar", ".cbz", ".cbr", ".7z"}
-AUTHOR_SEP = re.compile(r"[×✕／/、，,&＆]")
+# 作者の区切り。本番ライブラリに "[采芽杏奈x三島千廣]" のように半角 x で区切った表記があるため、
+# 日本語の文字に挟まれた x/X も区切りとみなす（英字名の中の x は区切らない）
+AUTHOR_SEP = re.compile(r"[×✕／/、，,&＆]|(?<=[^\x00-\x7F])[xX](?=[^\x00-\x7F])")
 HEAD_RE = re.compile(r"^\s*\[(?P<auth>[^\]]*)\]\s*(?P<rest>.*)$")
+# 巻番号のあとの記号（w・s のほか、本番ライブラリには b もある）は英字1〜2文字まで許す
 VOL_RE = re.compile(
-    r"^(?P<title>.*?)\s*第\s*(?P<v1>\d+)\s*(?:(?P<sep>[-~～〜\s])\s*(?P<v2>\d*))?\s*巻?\s*(?P<sfx>[wsWS])?\s*$")
+    r"^(?P<title>.*?)\s*第\s*(?P<v1>\d+)\s*(?:(?P<sep>[-~～〜\s])\s*(?P<v2>\d*))?\s*巻?\s*(?P<sfx>[A-Za-z]{1,2})?\s*$")
 SINGLE_DIR = "_single"
 
 # 判定のしきい値（暫定。本番ライブラリの一覧で調整する）
@@ -48,19 +51,22 @@ class Parsed:
     title: str                 # 正規化済み
     v1: int | None = None
     v2: int | None = None      # まとめ巻の終わり（"第10-" のような開いた範囲は -1）
+    akey: str = ""             # 作者表記を区切りなしで連結したもの（"わんた×ちわ小太郎" と "わんたちわ×小太郎" を同一視）
 
 
 def parse_name(stem: str) -> Parsed:
     m = HEAD_RE.match(stem)
     auth, rest = (m.group("auth"), m.group("rest")) if m else ("", stem)
-    authors = frozenset(a for a in (norm(x) for x in AUTHOR_SEP.split(auth)) if a)
+    parts = [norm(x) for x in AUTHOR_SEP.split(auth)]
+    authors = frozenset(a for a in parts if a)
+    akey = "".join(parts)
     v = VOL_RE.match(rest)
     if not v:
-        return Parsed(authors, norm(rest))
+        return Parsed(authors, norm(rest), akey=akey)
     v2 = None
     if v.group("sep"):
         v2 = int(v.group("v2")) if v.group("v2") else -1
-    return Parsed(authors, norm(v.group("title")), int(v.group("v1")), v2)
+    return Parsed(authors, norm(v.group("title")), int(v.group("v1")), v2, akey)
 
 
 def volumes(p: Parsed) -> set:
@@ -84,18 +90,25 @@ def split_ext(name):
 @dataclass
 class Work:
     path: str                                     # ライブラリ内の相対パス
-    aliases: list = field(default_factory=list)   # (authors, title)
+    aliases: list = field(default_factory=list)   # (authors, akey, title)
     files: list = field(default_factory=list)     # (name, size, Parsed)
 
 
 def build_library(dirs, files):
     """dirs: 相対パスのリスト、files: (相対パス, サイズ) のリスト（どちらもライブラリ基準）。"""
-    works = {}
+    works, vol_dirs = {}, []
     for rel in dirs:
         name = rel.rsplit("/", 1)[-1]
         if name.startswith("["):                     # 作品フォルダ（入れ子の外伝も作品）
             p = parse_name(name)
-            works[rel] = Work(rel, [(p.authors, p.title)])
+            if p.v1 is not None:                     # 「… 第01巻」のような巻フォルダ（画像を展開した巻）
+                vol_dirs.append((rel, name, p))
+            else:
+                works[rel] = Work(rel, [(p.authors, p.akey, p.title)])
+    for rel, name, p in vol_dirs:                    # 巻フォルダは親作品の巻として重複確認に使う
+        parent = rel.rsplit("/", 1)[0] if "/" in rel else ""
+        if parent in works:
+            works[parent].files.append((name + "/", -1, p))
     for rel, size in files:
         if "/" not in rel:
             continue
@@ -105,8 +118,8 @@ def build_library(dirs, files):
             p = parse_name(stem)
             w = works[parent]
             w.files.append((name, size, p))
-            if (p.authors, p.title) not in w.aliases:
-                w.aliases.append((p.authors, p.title))
+            if (p.authors, p.akey, p.title) not in w.aliases:
+                w.aliases.append((p.authors, p.akey, p.title))
     return list(works.values())
 
 
@@ -121,16 +134,19 @@ def title_score(a, b):
     return difflib.SequenceMatcher(None, a, b).ratio()
 
 
-def author_overlap(a, b):
+def author_overlap(a, b, ka="", kb=""):
+    """少ない方の作者が全員含まれていれば 1.0。区切り位置だけ違う表記（連結すると同じ）も 1.0。"""
     if not a or not b:
         return None
+    if ka and ka == kb:
+        return 1.0
     return len(a & b) / min(len(a), len(b))
 
 
 def score_work(p, w):
     best = (0.0, None)
-    for authors, title in w.aliases:
-        cur = (title_score(p.title, title), author_overlap(p.authors, authors))
+    for authors, akey, title in w.aliases:
+        cur = (title_score(p.title, title), author_overlap(p.authors, authors, p.akey, akey))
         if (cur[0], cur[1] or 0.0) > (best[0], best[1] or 0.0):
             best = cur
     return best
@@ -168,10 +184,15 @@ def make_plan(works, new_files):
                 items.append(Item("新規", name, size, folder, "該当作品なし（ライブラリ直下に作成）"))
             continue
         (ts, ao), w = cands[0]
-        rivals = [c for c in cands[1:] if c[0][0] >= TITLE_CONTAIN]
-        if not (ts == TITLE_SURE and (ao is None or ao > 0) and not rivals):
+        # 競合：タイトルが含む関係以上で、作者の一致度が1位と同等以上の候補
+        # （同じ原作の別作画のように作者が一部しか重ならない候補は競合にしない）
+        rivals = [c for c in cands[1:] if c[0][0] >= TITLE_CONTAIN and (c[0][1] or 0.0) >= (ao or 0.0)]
+        # 作者が一部しか重ならない（例：同じ原作の別作画）ときは自動で入れない
+        if not (ts == TITLE_SURE and (ao is None or ao >= 1.0) and not rivals):
             why = ("候補が複数" if rivals else
-                   "タイトル一致だが作者不一致" if ts == TITLE_SURE else "タイトルが類似のみ")
+                   "タイトル一致・作者が一部のみ一致" if ts == TITLE_SURE and ao else
+                   "タイトル一致だが作者不一致" if ts == TITLE_SURE else
+                   "タイトルの一方が他方を含む" if ts >= TITLE_CONTAIN else "タイトルが類似のみ")
             items.append(Item("要確認", name, size, w.path, why, [c[1] for c in cands]))
             continue
         vols = volumes(p)
