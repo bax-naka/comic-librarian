@@ -165,6 +165,19 @@ class RulesFromProduction(unittest.TestCase):
         it = self.kind(w, "[あび×樋辻臥命×かれい] 放課後の迷宮冒険者 第03巻.zip")
         self.assertEqual((it.kind, it.dest), ("追加", "[あび×樋辻臥命×かれい] 放課後の迷宮冒険者"))
 
+    def test_exact_title_wins_over_contained_title(self):
+        # 本編と外伝（サブフォルダ）：タイトル完全一致の候補が1つなら、含むだけの候補があっても自動で入れる
+        w = self.lib(["_A/[ヤマザキコレ] 魔法使いの嫁/[ヤマザキコレ] 魔法使いの嫁 第25巻.rar",
+                      "_A/[ヤマザキコレ] 魔法使いの嫁/[ヤマザキコレ] 魔法使いの嫁 詩篇 108 魔術師の青/"
+                      "[ヤマザキコレ] 魔法使いの嫁 詩篇 108 魔術師の青 第09巻.zip"])
+        it = self.kind(w, "[ヤマザキコレ] 魔法使いの嫁 第26巻.rar")
+        self.assertEqual((it.kind, it.dest), ("追加", "_A/[ヤマザキコレ] 魔法使いの嫁"))
+        it = self.kind(w, "[ヤマザキコレ] 魔法使いの嫁 詩篇 108 魔術師の青 第10巻.zip")
+        self.assertEqual((it.kind, it.dest), ("追加", "_A/[ヤマザキコレ] 魔法使いの嫁/[ヤマザキコレ] 魔法使いの嫁 詩篇 108 魔術師の青"))
+        # 完全一致が無ければ、含む関係の候補が複数あるときは従来どおり要確認
+        it = self.kind(w, "[ヤマザキコレ] 魔法使いの嫁 詩篇 第10巻.zip")
+        self.assertEqual(it.kind, "要確認")
+
     def test_volume_folder_is_not_a_work(self):
         w = self.lib(["[A] 竜馬/[A] 竜馬 第01巻/001.jpg"])
         self.assertEqual([x.path for x in w], ["[A] 竜馬"])
