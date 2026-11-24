@@ -186,9 +186,12 @@ def make_plan(works, new_files):
                 items.append(Item("新規", name, size, folder, "該当作品なし（ライブラリ直下に作成）"))
             continue
         (ts, ao), w = cands[0]
-        # 競合：タイトルが含む関係以上で、作者の一致度が1位と同等以上の候補
+        # 競合：作者の一致度が1位と同等以上で、タイトルも1位と同じ強さの候補。
+        # 1位がタイトル完全一致なら、完全一致の候補だけを競合とする（本編に対する外伝・続編のように
+        # 「含む」だけの候補では止めない）。1位が完全一致でなければ「含む」関係以上を競合とする。
         # （同じ原作の別作画のように作者が一部しか重ならない候補は競合にしない）
-        rivals = [c for c in cands[1:] if c[0][0] >= TITLE_CONTAIN and (c[0][1] or 0.0) >= (ao or 0.0)]
+        need = TITLE_SURE if ts == TITLE_SURE else TITLE_CONTAIN
+        rivals = [c for c in cands[1:] if c[0][0] >= need and (c[0][1] or 0.0) >= (ao or 0.0)]
         # 作者が一部しか重ならない（例：同じ原作の別作画）ときは自動で入れない
         if not (ts == TITLE_SURE and (ao is None or ao >= 1.0) and not rivals):
             why = ("候補が複数" if rivals else
